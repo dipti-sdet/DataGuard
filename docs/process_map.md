@@ -34,6 +34,56 @@ flowchart TD
 
 **Version rule** (steps 2-4): no history anywhere = 1 | exists on other dates only = latest + 1 | exists this date and source batch changed = last + 1 | exists this date, unchanged = keep.
 
+## Versioning Logic (Branches)
+
+Every incoming order is assigned to one branch, based on whether it already
+exists in the target and what changed.
+
+> **Note:** Branch number = which rule fired. Version number = that order's own
+> change history. They are not linked. A branch never "produces" a fixed version;
+> it always does `new version = previous version + 1` (or no change).
+
+### Decision tree
+
+```
+Is this order already in the target?
+├── No  → Branch 1 (new, insert as v1)
+└── Yes → Did anything meaningful change?
+         ├── No  → Branch 4 (unchanged, keep current version)
+         └── Yes → Why?
+                  ├── New business date   → Branch 2
+                  └── New batch / resend  → Branch 3
+```
+
+### Branch definitions
+
+| Branch | Situation | What the pipeline does |
+|---|---|---|
+| 1 | Brand-new order, not in target | Insert as v1 |
+| 2 | Existing order, new business date, data changed | New version = previous + 1; close old version |
+| 3 | Existing order re-sent in a later batch (correction) | New version = previous + 1; close old version |
+| 4 | Existing order, nothing changed | No new row; version unchanged |
+
+> TODO: Confirm branch 2 vs 3 definitions against the version-assignment
+> code (CASE WHEN / if-elif block).
+
+### Seed data mapping
+
+| Seed row | Prior version | Branch | Expected version |
+|---|---|---|---|
+| Order 1001 (events 9001, 9010) | none | 1 | v1 (latest event kept, status OPEN) |
+| Order 1002 on 01-15 | v2 | 2 | v3 |
+| Order 1002 on 01-14 | v3 | 4 | v3 (unchanged) |
+| Order 1003 (batch B4 → B5) | v1 | 3 | v2 |
+| Order 1004 | v3 | 4 | v3 (unchanged) |
+
+### Validation checks
+
+1. Exactly one current row per order.
+2. Changed orders: new version = previous version + 1, and the old version is closed.
+3. Unchanged orders: row count and version are the same before and after the run.
+4. Version numbers never skip or reset.
+
 ## Things that trip people up
 - Delta views recompute on read. After publish they are empty, so delta checks run BEFORE step 5 (stage 4) and target checks run AFTER (stage 5).
 - The change scope is a table, not a view, because the first target insert would otherwise change the delta mid-publish.

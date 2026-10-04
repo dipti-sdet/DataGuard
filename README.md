@@ -17,7 +17,7 @@ inspired by a production-style trading-data pipeline. Python + SQLite + pytest, 
     python run_dataguard.py           # runs everything, writes the HTML report
     pytest                            # good run must pass all checks; every bug must be detected
     Full setup guide: docs/setup.md
-    
+    Versions used: docs/environment.md
 ## Add your own
 - **New check:** copy any function in `dataguard/checks.py`, give it a new id, SQL and expected value.
 - **New bug:** add an entry in `dataguard/bugs.py` (file, old text, new text, detector check ids).
