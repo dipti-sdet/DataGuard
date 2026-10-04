@@ -79,6 +79,41 @@ This is a stateful test: change the source, re-run, check the result.
 Why this matters: the real pipeline is incremental, and the bugs that hurt are the ones that only show when data changes between runs.
 
 ---
+## Level 4: versioning (self-checked, not in the grader)
+
+The grader does not know these yet. Verify them yourself: run on the good ETL (must pass), then with `bugs=('B5',)` (P13 and P14 must fail). See the "Versioning logic" section in the design doc for the 4 branches.
+
+**P13 Version rule** | after step 4 | must catch B5
+For each key in `wrk_orders_ver`, compute the expected version from `tgt_orders` (still unpublished at step 4) using the branch rule, and select keys where it differs.
+```
+CASE
+  WHEN <no tgt row for order_id>                          THEN 1
+  WHEN <no tgt row for order_id on this trade_date>       THEN <MAX version, all dates> + 1
+  WHEN <tgt batch on this date <> current batch>          THEN <MAX version, this date> + 1
+  ELSE <MAX version, this date>
+END
+```
+Seed answers to sanity-check against: 1001 → 1, 1002 01-14 → 2, 1002 01-15 → 3, 1003 → 2, 1004 → 3.
+Why: this is the core business rule. Checking each branch with a computed expectation beats hardcoding the seed answers.
+
+**P14 Unchanged keys not in delta** | after step 4 | must catch B5
+Rows in `vw_orders_delta` that already exist in `tgt_orders` with the same `order_id`, `trade_date` and `source_batch_id`. Expect none. On the good run, 1004 and 1002 01-14 must be absent.
+Why: if branch 4 rows leak into the delta, step 5 republishes them and you get duplicate history.
+
+**P15 History untouched** | after step 5 | stateful, like P12
+1. Before re-running step 5, take `c.rows("SELECT * FROM tgt_orders")`.
+2. Re-run: `run_steps(c.con, 5, c.bugs)`.
+3. Every row from step 1 must still exist, unchanged (`before EXCEPT after` is empty).
+Why: the target is published history. Step 5 may add rows, never edit or delete them.
+
+**P16 No skipped versions** | after step 5
+Per `order_id` in `tgt_orders`: `MIN(order_version) = 1` and `MAX(order_version) = COUNT(DISTINCT order_version)`. Return orders that break this.
+Why: a gap (v1 → v3) or reset means a version was lost or miscounted, even if each row looks fine on its own.
+
+P15 and P16 may not catch any existing bug. That's fine: prove they work by writing your own bug for them (see "When you finish").
+
+---
 ## When you finish
 - `python practice/check_my_work.py` shows 12/12.
+- P13-P16 pass on the good run, and P13-P14 fail on B5.
 - Add 3 checks of your own to `dataguard/checks.py` and 1 bug of your own to `dataguard/bugs.py` (see README), then run `python run_dataguard.py` and look at your bug in the report.

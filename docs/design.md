@@ -1,9 +1,14 @@
 # DataGuard design
 
 ## Flow (the whole thing is 3 ideas)
+
 1. **Stage:** filter + join SOURCE tables into work tables; log orphans (step 1).
-2. **Version + delta:** compare against what is already published, assign a version, build `delta = latest EXCEPT published` (steps 2, 3, 4: the same loop for orders, executions, allocations).
+2. **Version + delta:** compare against what is already published, assign a version, build delta = latest EXCEPT published (steps 2, 3, 4: the same loop for orders, executions, allocations).
 3. **Publish:** collect changed keys into a scope, inner-join the work tables to it, write to target (step 5, the only step that writes to target).
+
+Run scope is hardcoded: trade dates 2024-01-14..2024-01-15, current batch B5. Delta views recompute on read, so checks on deltas run before publish (stage 4), checks on the target run after (stage 5).
+
+## Layers
 
 | Layer | Tables |
 |---|---|
@@ -12,74 +17,47 @@
 | Delta views | vw_orders_delta, vw_exec_delta, vw_alloc_delta (plus *_last_ver / *_latest_ver) |
 | Target (published history) | tgt_orders, tgt_executions, tgt_allocations |
 
-**Version rule** (steps 2-4): no history anywhere = 1 | exists on other dates only = latest + 1 | exists this date and source batch changed = last + 1 | exists this date, unchanged = keep.
+## Versioning logic (steps 2-4)
 
-Run scope is hardcoded: trade dates 2024-01-14..2024-01-15, current batch B5. Delta views recompute on read, so checks on deltas run before publish (stage 4), checks on the target run after (stage 5).
-
-
-## Versioning Logic (Branches)
-
-Every incoming order is assigned to one branch, based on whether it already
-exists in the target and what changed.
-
-> **Note:** Branch number = which rule fired. Version number = that order's own
-> change history. They are not linked. A branch never "produces" a fixed version;
-> it always does `new version = previous version + 1` (or no change).
-
-### Decision tree
+Each key on each trade date in the run falls into exactly one branch.
 
 ```
-Is this order already in the target?
-├── No  → Branch 1 (new, insert as v1)
-└── Yes → Did anything meaningful change?
-         ├── No  → Branch 4 (unchanged, keep current version)
-         └── Yes → Why?
-                  ├── New business date   → Branch 2
-                  └── New batch / resend  → Branch 3
+Does this key have any published history?
+├── No  → Branch 1: version = 1
+└── Yes → Does it already exist on this trade date?
+          ├── No  → Branch 2: version = latest + 1   (latest across all dates)
+          └── Yes → Did the source batch change?
+                    ├── Yes → Branch 3: version = last + 1   (last on this date)
+                    └── No  → Branch 4: keep version (not in delta, not republished)
 ```
 
-### Branch definitions
-
-| Branch | Situation | What the pipeline does |
+| Branch | Situation | Version |
 |---|---|---|
-| 1 | Brand-new order, not in target | Insert as v1 |
-| 2 | Existing order, new business date, data changed | New version = previous + 1; close old version |
-| 3 | Existing order re-sent in a later batch (correction) | New version = previous + 1; close old version |
-| 4 | Existing order, nothing changed | No new row; version unchanged |
+| 1 | No history anywhere | 1 |
+| 2 | Exists on other dates only | latest + 1 |
+| 3 | Exists on this date, source batch changed | last + 1 |
+| 4 | Exists on this date, batch unchanged | keep |
 
-> TODO: Confirm branch 2 vs 3 definitions against the version-assignment
-> code (CASE WHEN / if-elif block).
+**Note:** Branch number = which rule fired. Version number = that key's own history. They are not linked; the same branch can produce v2 for one order and v3 for another.
 
-### Seed data mapping
+Versioning checks: VR01, DF01 (bug B5). Practice: P12-P16 in the workbook.
 
-| Seed row | Prior version | Branch | Expected version |
-|---|---|---|---|
-| Order 1001 (events 9001, 9010) | none | 1 | v1 (latest event kept, status OPEN) |
-| Order 1002 on 01-15 | v2 | 2 | v3 |
-| Order 1002 on 01-14 | v3 | 4 | v3 (unchanged) |
-| Order 1003 (batch B4 → B5) | v1 | 3 | v2 |
-| Order 1004 | v3 | 4 | v3 (unchanged) |
+## Seed data
 
-### Validation checks
-
-1. Exactly one current row per order.
-2. Changed orders: new version = previous version + 1, and the old version is closed.
-3. Unchanged orders: row count and version are the same before and after the run.
-4. Version numbers never skip or reset.
-
-## Seed cheat sheet
-| Row | Purpose |
-|---|---|
-| order 1001 (events 9001, 9010) | dedup keeps latest (OPEN); version branch 1 |
-| order 1002 on 01-15 / 01-14 | branch 2 (v3) / unchanged |
-| order 1003 (batch B4 to B5, account ACC3) | branch 3 (v2); account missing, client UNKNOWN |
-| order 1004 | branch 4 (v3), unchanged, venue VEN_C, source SYS2 |
-| orders 1006-1011 | filtered out: venue, instrument, event type, before window, after window, source system |
-| execution 102 (OFFX) | must become OTC |
-| execution 107, allocation 208 | orphans: rejected and logged |
-| prices 1500.25 | precision (rounding) bug |
+| Seed row | Tests | Expected result |
+|---|---|---|
+| Order 1001 (events 9001, 9010) | Dedup, branch 1 | Latest event 9010 kept (status OPEN); v1 |
+| Order 1002, 01-14 | Branch 4 | Keeps existing v2; not in delta |
+| Order 1002, 01-15 | Branch 2 | v3 (latest v2 + 1) |
+| Order 1003 (batch B4 → B5, account ACC3) | Branch 3, NULL handling | v2; account missing → client UNKNOWN |
+| Order 1004 | Branch 4, mapping | Stays v3, not in delta; venue VEN_C, source SYS2 |
+| Orders 1006-1011 | Filters | Excluded: venue, instrument, event type, before window, after window, source system |
+| Execution 102 (OFFX) | Mapping | Venue becomes OTC |
+| Execution 107, allocation 208 | Orphans | Rejected and logged in etl_reject_log |
+| Prices 1500.25 | Precision | Value preserved exactly (no rounding) |
 
 ## Bug catalogue
+
 | Bug | Type | Primary detector |
 |---|---|---|
 | B1 | Wrong join type | FL01, NL03 |
@@ -94,5 +72,5 @@ Is this order already in the target?
 | B10 | Boundary / off-by-one date | BD01, FL01 |
 
 ## Simplified vs a real pipeline
-SQLite instead of a big-data engine; hardcoded date window and batch; execution/allocation versions keyed by their own id; no
-receive/release union, cross-trade remap or extra dimensions. The shape (work table, version, EXCEPT delta, scope, inner-join write) is the same.
+
+SQLite instead of a big-data engine; hardcoded date window and batch; execution/allocation versions keyed by their own id; no receive/release union, cross-trade remap or extra dimensions. The shape (work table, version, EXCEPT delta, scope, inner-join write) is the same.
