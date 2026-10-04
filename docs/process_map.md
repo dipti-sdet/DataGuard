@@ -19,13 +19,13 @@ flowchart TD
 ```
 
 ## Steps
-| Step | File | Reads | Does | Writes | Checks that run after it |
-|---|---|---|---|---|---|
-| 1 | `1_stage.sql` | src_* | venue / instrument / source / event / date filters; left join accounts; keep latest event per order+date; reject orphan executions and allocations | wrk_orders, wrk_executions, wrk_allocations, etl_reject_log | RC01-05, FL01-02, BD01, DU01-02, DD01, NL01-03, RI01-03 |
-| 2 | `2_orders.sql` | wrk_orders, tgt_orders | assign version, map side code to text, build delta | wrk_orders_ver, vw_orders_delta | TR01, VR01, DF01 |
-| 3 | `3_executions.sql` | wrk_executions, tgt_executions | assign version, map OFFX to OTC, build delta | wrk_executions_ver, vw_exec_delta | TR02, VR02, DF02 |
-| 4 | `4_allocations.sql` | wrk_allocations, tgt_allocations | assign version, build delta | wrk_allocations_ver, vw_alloc_delta | VR03, DF03, DF04, BR01 |
-| 5 | `5_publish.sql` | the 3 deltas + 3 versioned work tables | build change scope; inner join each work table to it; insert | wrk_change_scope, tgt_* | PB01-03, RC06, DU03, NL04, RI04, ST01-03, ID01 |
+| Step | File | What it does | Reads | Details | Writes | Checks that run after it |
+|---|---|---|---|---|---|---|
+| 1 | `1_stage.sql` | Picks the in-scope raw data, cleans it, and throws out orphans | src_* | venue / instrument / source / event / date filters; left join accounts; keep latest event per order+date; reject orphan executions and allocations | wrk_orders, wrk_executions, wrk_allocations, etl_reject_log | RC01-05, FL01-02, BD01, DU01-02, DD01, NL01-03, RI01-03 |
+| 2 | `2_orders.sql` | Decides each order's version and finds which orders are new or changed | wrk_orders, tgt_orders | assign version, map side code to text, build delta | wrk_orders_ver, vw_orders_delta | TR01, VR01, DF01 |
+| 3 | `3_executions.sql` | Same as step 2, for executions | wrk_executions, tgt_executions | assign version, map OFFX to OTC, build delta | wrk_executions_ver, vw_exec_delta | TR02, VR02, DF02 |
+| 4 | `4_allocations.sql` | Same as step 2, for allocations | wrk_allocations, tgt_allocations | assign version, build delta | wrk_allocations_ver, vw_alloc_delta | VR03, DF03, DF04, BR01 |
+| 5 | `5_publish.sql` | Writes only the new/changed rows into the target history | the 3 deltas + 3 versioned work tables | build change scope; inner join each work table to it; insert | wrk_change_scope, tgt_* | PB01-03, RC06, DU03, NL04, RI04, ST01-03, ID01 |
 
 ## The three ideas
 1. **Stage:** shape the current state from source (step 1).
