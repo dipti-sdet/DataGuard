@@ -28,13 +28,23 @@ Return `(passed, detail)`; put the offending rows in `detail` so a failure expla
 | 15 | Schema / data type | Are columns and types as designed? | `PRAGMA table_info(table)` | | P07 |
 | 16 | Filters & boundaries | Are in-scope rows kept and out-of-scope rows dropped, at the edges? | key set equality; first and last day | FL01-02, BD01 | P06 |
 | 17 | Dedup / latest record | Did the right duplicate win? | assert the winner's id and status | DD01 | |
-| 18 | Versioning | Does each branch of the version rule give the right number? | dict of key to expected version | VR01-03 | P12 |
-| 19 | Delta / incremental | Only new or changed rows in the delta? Unchanged rows absent? | key set equality on the delta; absence checks | DF01-04 | |
-| 20 | Publish / scope | Is every changed key published, and nothing else? | work EXCEPT target is empty; scope key set | PB01-03 | |
+| 18 | Versioning | Does each branch of the version rule give the right number? No gaps or resets? | dict of key to expected version; MAX = COUNT DISTINCT | VR01-03 | P12, P13, P16 |
+| 19 | Delta / incremental | Only new or changed rows in the delta? Unchanged rows absent? | key set equality on the delta; absence checks | DF01-04 | P14 |
+| 20 | Publish / scope | Is every changed key published, nothing else, and existing history untouched? | work EXCEPT target is empty; scope key set; target before EXCEPT after is empty | PB01-03 | P15 |
 | 21 | Idempotency / re-run | Does a second run change nothing? | count before and after run 2 | ID01 | |
 | 22 | Incremental scenario | If the source changes, does the next run publish exactly that change? | UPDATE source, re-run, assert version and row counts | | P12 |
 
 Plus a **regression** layer: plant a bug, confirm a check fails. That is `bugs.py` and `pytest`.
+
+## Versioning checks in detail (#18-20)
+The version rule (see design doc): no history = 1 | exists on other dates only = latest + 1 | exists this date, batch changed = last + 1 | exists this date, unchanged = keep.
+
+| Check | What it proves | Pattern | Stage | Practice |
+|---|---|---|---|---|
+| Version rule | Each key's version matches its branch | Compute expected version from `tgt_orders` with a CASE per branch; select keys where it differs | after step 4 | P13 |
+| Unchanged keys not in delta | Branch 4 keys are not republished | `vw_orders_delta` rows matching `tgt_orders` on order_id, trade_date, source_batch_id; expect none | after step 4 | P14 |
+| History untouched | Target is append-only; publish never edits or deletes | Snapshot `tgt_orders`, re-run step 5, `before EXCEPT after` is empty | after step 5 | P15 |
+| No skipped versions | No gaps (v1 → v3) or resets per order | Per order_id: `MIN(order_version) = 1` and `MAX = COUNT(DISTINCT order_version)` | after step 5 | P16 |
 
 ## Order to learn them
 1. Counts, duplicates, NULLs (#1, #5, #6): 15 minutes each, the basics everyone is asked.
